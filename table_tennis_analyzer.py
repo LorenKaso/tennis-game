@@ -1,10 +1,15 @@
 # table_tennis_analyzer.py
-
 from ultralytics import YOLO
+import numpy as np
 import cv2
+#heat-map
+import csv
+from ultralytics import YOLO
+import heatmap  
 
-# Load YOLO model
-model = YOLO('yolov8n-pose.pt') 
+
+# Load YOLO model 
+model = YOLO('yolo11n-pose.pt') 
 
 # Set start and end frame constants
 START_FRAME = 0
@@ -25,36 +30,75 @@ if START_FRAME > 0:
 
 frame_num = START_FRAME
 
-# Process frames from the video
+# Initialize CSV file for player positions
+csv_file = open("player_positions.csv", mode="w", newline="")
+csv_writer = csv.writer(csv_file)
+csv_writer.writerow(["frame", "player1_position_x", "player1_position_y", "player2_position_x", "player2_position_y"])
+
+#background_frame heatmap
+background_frame = None
+cap.set(cv2.CAP_PROP_POS_FRAMES, 20)  # בחרי פריים מייצג
+ret, background_frame = cap.read()
+if ret:
+    cv2.imwrite("background_frame.png", background_frame)
+cap.set(cv2.CAP_PROP_POS_FRAMES, START_FRAME)  # חזרה להתחלה
+
+player1_ref = None  # reference למיקום התחלה של שחקנית שמאל
+
 while cap.isOpened():
     print(f"Frame number: {frame_num}")
-    frame_num += 1
-    if frame_num > END_FRAME:
+    if frame_num >= END_FRAME and END_FRAME != 0:
         break
+
     ret, frame = cap.read()
     if not ret:
         print("End of video or failed to read frame.")
         break
 
-    if END_FRAME != 0 and frame_num > END_FRAME:
-        print(f"Reached END_FRAME: {END_FRAME}")
-        break
-    
-    # Resize frame for faster processing
+    # Resize frame
     scale = 0.55
-    new_width = int(frame.shape[1] * scale)
-    new_height = int(frame.shape[0] * scale)
+    resized_frame = cv2.resize(frame, (int(frame.shape[1] * scale), int(frame.shape[0] * scale)))
 
-    resized_frame = cv2.resize(frame, (new_width, new_height))
+    # YOLO Detection
     results = model(resized_frame, imgsz=1500, conf=0.25)
+    boxes = results[0].boxes.xyxy  # bounding boxes
 
-    # Annotate and write frame to output
+    # בחר את שתי הקופסאות הכי רחבות (כדי להתמקד בשחקניות)
+    boxes = sorted(boxes, key=lambda b: b[2] - b[0], reverse=True)[:2]
+
+    player_centers = []
+    for box in boxes:
+        x1, y1, x2, y2 = box.tolist()
+        foot_x = (x1 + x2) / 2 / scale
+        foot_y = y2 / scale
+        player_centers.append((foot_x, foot_y))
+
+    # קיבוע זהות לפי מיקום תחלת הסרטון
+    if len(player_centers) == 2:
+        # פריים ראשון – קובעים מיקומי רפרנס
+        if player1_ref is None:
+            player_centers.sort(key=lambda p: p[0])  # הכי שמאלית
+        player1_ref = player_centers[0]  # שמירה של נקודת (X,Y) שלמה
+
+        d0 = np.linalg.norm(np.array(player_centers[0]) - np.array(player1_ref))
+        d1 = np.linalg.norm(np.array(player_centers[1]) - np.array(player1_ref))
+        if d0 < d1:
+            p1, p2 = player_centers[0], player_centers[1]
+        else:
+            p1, p2 = player_centers[1], player_centers[0]
+
+        csv_writer.writerow([frame_num, p1[0], p1[1], p2[0], p2[1]])
+
+    # כתיבת וידאו עם אנוטציות
     annotated_frame = results[0].plot()
-    annotated_frame_resized = cv2.resize(annotated_frame, (width, height))
-    out.write(annotated_frame_resized)
+    output_frame = cv2.resize(annotated_frame, (width, height))
+    out.write(output_frame)
+
     frame_num += 1
 
 # Release video resources
 cap.release()
 out.release()
 cv2.destroyAllWindows()
+# Close the CSV file
+csv_file.close()
