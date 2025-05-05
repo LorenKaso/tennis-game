@@ -7,14 +7,12 @@ import csv
 from ultralytics import YOLO
 import heatmap  
 
-
 # Load YOLO model 
 model = YOLO('yolo11n-pose.pt') 
 
 # Set start and end frame constants
 START_FRAME = 0
-END_FRAME = 200
-
+END_FRAME = 1500
 
 # Load video and get properties
 cap = cv2.VideoCapture('input.mp4')
@@ -37,13 +35,39 @@ csv_writer.writerow(["frame", "player1_position_x", "player1_position_y", "playe
 
 #background_frame heatmap
 background_frame = None
-cap.set(cv2.CAP_PROP_POS_FRAMES, 20)  # בחרי פריים מייצג
+cap.set(cv2.CAP_PROP_POS_FRAMES, 20) 
 ret, background_frame = cap.read()
 if ret:
     cv2.imwrite("background_frame.png", background_frame)
-cap.set(cv2.CAP_PROP_POS_FRAMES, START_FRAME)  # חזרה להתחלה
+cap.set(cv2.CAP_PROP_POS_FRAMES, START_FRAME) 
 
-player1_ref = None  # reference למיקום התחלה של שחקנית שמאל
+player1_ref = None 
+
+def is_valid_frame(boxes, width, height):
+    if len(boxes) != 2:
+        return False
+
+    for box in boxes:
+        x1, y1, x2, y2 = box.tolist()
+        box_height = y2 - y1
+        box_width = x2 - x1
+
+        if box_height < height * 0.2:   
+            return False
+        if box_width < width * 0.05:   
+            return False
+        if y1 < height * 0.1:          
+            return False
+        if box_width / box_height < 0.2:  
+            return False
+
+    h0 = boxes[0][3] - boxes[0][1]
+    h1 = boxes[1][3] - boxes[1][1]
+    if abs(h0 - h1) > height * 0.15:
+        return False
+
+    return True
+
 
 while cap.isOpened():
     print(f"Frame number: {frame_num}")
@@ -62,8 +86,39 @@ while cap.isOpened():
     # YOLO Detection
     results = model(resized_frame, imgsz=1500, conf=0.25)
     boxes = results[0].boxes.xyxy  # bounding boxes
+    boxes = sorted(boxes, key=lambda b: b[2] - b[0], reverse=True)[:2]
 
-    # בחר את שתי הקופסאות הכי רחבות (כדי להתמקד בשחקניות)
+    if is_valid_frame(boxes, width, height):
+        boxes = sorted(boxes, key=lambda b: b[2] - b[0], reverse=True)[:2]
+
+        player_centers = []
+        for box in boxes:
+            x1, y1, x2, y2 = box.tolist()
+            foot_x = (x1 + x2) / 2 / scale
+            foot_y = y2 / scale
+            player_centers.append((foot_x, foot_y))
+
+        if len(player_centers) == 2:
+            if player1_ref is None:
+                player_centers.sort(key=lambda p: p[0])  
+            player1_ref = player_centers[0]  
+
+            d0 = np.linalg.norm(np.array(player_centers[0]) - np.array(player1_ref))
+            d1 = np.linalg.norm(np.array(player_centers[1]) - np.array(player1_ref))
+            if d0 < d1:
+                p1, p2 = player_centers[0], player_centers[1]
+            else:
+                p1, p2 = player_centers[1], player_centers[0]
+
+            csv_writer.writerow([frame_num, p1[0], p1[1], p2[0], p2[1]])
+
+        # Annotate and write only valid frames
+        annotated_frame = results[0].plot()
+        output_frame = cv2.resize(annotated_frame, (width, height))
+        out.write(output_frame)
+
+    frame_num += 1
+
     boxes = sorted(boxes, key=lambda b: b[2] - b[0], reverse=True)[:2]
 
     player_centers = []
@@ -73,12 +128,10 @@ while cap.isOpened():
         foot_y = y2 / scale
         player_centers.append((foot_x, foot_y))
 
-    # קיבוע זהות לפי מיקום תחלת הסרטון
     if len(player_centers) == 2:
-        # פריים ראשון – קובעים מיקומי רפרנס
         if player1_ref is None:
-            player_centers.sort(key=lambda p: p[0])  # הכי שמאלית
-        player1_ref = player_centers[0]  # שמירה של נקודת (X,Y) שלמה
+            player_centers.sort(key=lambda p: p[0])  
+        player1_ref = player_centers[0]  
 
         d0 = np.linalg.norm(np.array(player_centers[0]) - np.array(player1_ref))
         d1 = np.linalg.norm(np.array(player_centers[1]) - np.array(player1_ref))
@@ -89,10 +142,11 @@ while cap.isOpened():
 
         csv_writer.writerow([frame_num, p1[0], p1[1], p2[0], p2[1]])
 
-    # כתיבת וידאו עם אנוטציות
+    # Annotate and write only valid frames
     annotated_frame = results[0].plot()
     output_frame = cv2.resize(annotated_frame, (width, height))
-    out.write(output_frame)
+    out.write(output_frame)  
+
 
     frame_num += 1
 
